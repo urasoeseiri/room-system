@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>部屋使用状況</title>
+  <script src="https://www.gstatic.com/firebasejs/9.6.11/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.11/firebase-firestore-compat.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; background-color: #f9f9f9; }
+    h1 { text-align: center; }
+    .room-grid { display: flex; flex-direction: column; gap: 32px; max-width: 1000px; margin: 0 auto; }
+    .room-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+    .room { padding: 12px; border: 1px solid #ccc; border-radius: 10px; background: #fff; box-shadow: 2px 2px 6px rgba(0,0,0,0.05); }
+    .occupied { background-color: #ffd8a8; }
+    .available { background-color: #e0ffe0; }
+    .over-limit { background-color: #ffcccc !important; }
+    button { margin-top: 8px; padding: 6px 12px; border: none; border-radius: 5px; cursor: pointer; }
+    .note-input { width: 100%; margin-top: 4px; padding: 4px; font-size: 0.9em; }
+    #selector { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border: 1px solid #ccc; box-shadow: 0 2px 10px rgba(0,0,0,0.2); border-radius: 10px; max-width: 90%; max-height: 80%; overflow-y: auto; z-index: 9999; }
+    .user-list, .purpose-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 10px; }
+    .user-button, .purpose-button { padding: 10px; border: 1px solid #ccc; background: #f0f0f0; border-radius: 5px; cursor: pointer; text-align: center; }
+    .user-button:hover, .purpose-button:hover { background-color: #d0e0ff; }
+  </style>
+</head>
+<body>
+<h1>部屋の使用状況</h1>
+<button onclick="downloadCSV()">CSVダウンロード</button>
+<div class="room-grid" id="room-list"></div>
+
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyDC8G4p5wn_84jYu3a6-VdxdmBNpWumtSQ",
+  authDomain: "room-system-v2.firebaseapp.com",
+  projectId: "room-system-v2",
+  storageBucket: "room-system-v2.appspot.com",
+  messagingSenderId: "627742121188",
+  appId: "1:627742121188:web:14b1dd18de622f7b44a0f1"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+const adminPassword = "seiri2221";
+
+const allRoomOrder = [
+  ["神経伝導速度室", "部屋8", "部屋7", "部屋6", "部屋5"],
+  ["脳波室", "部屋1", "部屋2", "部屋3", "部屋4"],
+  ["心電図室1", "心電図室2", "肺機能検査室", "生理機能検査室A", "生理機能検査室B"]
+];
+
+const roomPurposes = {
+  "神経伝導速度室": ["ホルター・アプノ","伝導速度","エコー"],
+  "脳波室": ["ホルター・アプノ","脳波検査"],
+  "心電図室1": ["心電図", "肺機能"],
+  "心電図室2": ["心電図", "ABI"],
+  "肺機能検査室": ["標準肺機能", "精密肺機能"],
+  "生理機能検査室A": ["ABI", "その他"],
+  "生理機能検査室B": ["SPP", "ホルター・アプノ", "その他"]
+};
+
+const defaultPurposes = [
+  "心エコー", "腹部エコー", "頸動脈エコー", "乳腺エコー", "甲状腺エコー",
+  "下肢静脈エコー", "下肢動脈エコー", "腎動脈エコー", "穿刺部エコー",
+  "その他エコー",  "ソナゾイド造影"
+];
+
+function renderRoomsFromSnapshot(snapshot) {
+  const docs = snapshot.docs;
+  const roomMap = {};
+  docs.forEach(doc => roomMap[doc.id] = doc);
+  const roomList = document.getElementById("room-list");
+  roomList.innerHTML = "";
+
+  allRoomOrder.forEach(row => {
+    const rowDiv = document.createElement("div");
+    rowDiv.className = "room-row";
+    row.forEach(name => {
+      const doc = roomMap[name];
+      if (!doc) return;
+      const data = doc.data();
+      const elapsed = data.startTime ? calcElapsed(data.startTime) : 0;
+      const div = document.createElement("div");
+      let className = "room ";
+      className += data.user ? "occupied " : "available ";
+      if (elapsed >= 20) className += "over-limit";
+      div.className = className;
+      div.innerHTML = `
+        <strong>${name}</strong><br/>
+        使用者：<span>${data.user || "空き"}</span><br/>
+        用途：<span>${data.purpose || "-"}</span><br/>
+        経過時間：<span>${data.startTime ? elapsed + "分" : "-"}</span><br/>
+        <input class="note-input" maxlength="30" value="${data.note || ""}" placeholder="自由入力" onchange="updateNote('${name}', this.value)" />
+        <button onclick="handleClick('${name}', ${!!data.user})">${data.user ? "退出" : "入室"}</button>
+      `;
+      rowDiv.appendChild(div);
+    });
+    roomList.appendChild(rowDiv);
+  });
+}
+
+function calcElapsed(startTime) {
+  const [h, m] = startTime.split(":").map(Number);
+  const start = new Date();
+  start.setHours(h, m, 0);
+  return Math.floor((Date.now() - start.getTime()) / 60000);
+}
+
+function handleClick(id, occupied) {
+  if (occupied) {
+    db.collection("rooms").doc(id).get().then(doc => {
+      const data = doc.data();
+      if (!data.startTime) return;
+      const elapsed = calcElapsed(data.startTime);
+      const now = new Date();
+      const end = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+      db.collection("logs").add({
+        user: data.user,
+        room: id,
+        purpose: data.purpose,
+        date: now.toLocaleDateString("ja-JP"),
+        start: data.startTime,
+        end,
+        duration: `${elapsed}分`,
+        note: data.note || ""
+      });
+      db.collection("rooms").doc(id).set({ user: "", purpose: "", startTime: "", note: "" });
+    });
+  } else {
+    selectUser(id);
+  }
+}
+
+function selectUser(id) {
+  const selector = document.createElement("div");
+  selector.id = "selector";
+  const users = ["喜舎場", "照屋", "長元", "たくし", "下地", "小山", "仲宗根", "名嘉美", "赤嶺", "髙塚", "大西", "名嘉由", "玉山", "森田", "大城", "川井"];
+  const userButtons = users.map(name => `<div class='user-button' onclick="selectPurpose('${id}', '${name}')">${name}</div>`).join("");
+  selector.innerHTML = `<p><strong>使用者を選択してください：</strong></p><div class="user-list">${userButtons}</div><br/><button onclick="closeSelector()">キャンセル</button>`;
+  document.body.appendChild(selector);
+}
+
+function selectPurpose(id, user) {
+  const selector = document.getElementById("selector");
+  const purposes = roomPurposes[id] || defaultPurposes;
+  selector.innerHTML = `<p><strong>用途を選択してください：</strong></p><div class="purpose-list">${purposes.map(p => `<div class='purpose-button' onclick="enterRoom('${id}', '${user}', '${p}')">${p}</div>`).join("")}</div><br/><button onclick="closeSelector()">キャンセル</button>`;
+}
+
+function enterRoom(id, user, purpose) {
+  const now = new Date();
+  const h = now.getHours().toString().padStart(2, '0');
+  const m = now.getMinutes().toString().padStart(2, '0');
+  db.collection("rooms").doc(id).set({ user, purpose, startTime: `${h}:${m}`, note: "" });
+  closeSelector();
+}
+
+function closeSelector() {
+  const el = document.getElementById("selector");
+  if (el) el.remove();
+}
+
+function updateNote(id, value) {
+  db.collection("rooms").doc(id).update({ note: value });
+}
+
+function downloadCSV() {
+  const input = prompt("パスワードを入力してください：");
+  if (input !== adminPassword) {
+    alert("パスワードが間違っています！");
+    return;
+  }
+  db.collection("logs").get().then(snapshot => {
+    const rows = [];
+    snapshot.forEach(doc => {
+      const d = doc.data();
+      if (d.user && d.room && d.purpose && d.date && d.start && d.end && d.duration) {
+        rows.push([d.user, d.room, d.purpose, d.date, d.start, d.end, d.duration, d.note || ""]);
+        doc.ref.delete();
+      }
+    });
+    if (rows.length === 0) return alert("保存するデータがありません。");
+    const header = ["使用者", "部屋名", "用途", "日付", "開始時間", "終了時間", "経過時間", "メモ"];
+    const csv = [header, ...rows].map(r => r.join(",")).join("\n");
+    const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "使用履歴.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  });
+}
+
+db.collection("rooms").onSnapshot(renderRoomsFromSnapshot);
+
+const initRooms = allRoomOrder.flat();
+initRooms.forEach(name => {
+  db.collection("rooms").doc(name).get().then(doc => {
+    if (!doc.exists) db.collection("rooms").doc(name).set({ user: "", purpose: "", startTime: "", note: "" });
+  });
+});
+</script>
+</body>
+</html>
