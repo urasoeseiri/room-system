@@ -200,6 +200,11 @@ initRooms.forEach(name => {
     if (!doc.exists) db.collection("rooms").doc(name).set({ user: "", purpose: "", startTime: "", note: "" });
   });
 });
+
+setInterval(() => {
+  db.collection("rooms").get().then(renderRoomsFromSnapshot);
+}, 60000); 
+
 </script>
 </body>
 </html>
